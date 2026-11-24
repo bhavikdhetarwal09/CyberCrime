@@ -63,6 +63,76 @@ const TEMP_ROLE_OTPS: Record<'Administrator' | 'Investigator', string> = {
   Investigator: resolveTemporaryRoleOtp('TEMP_INVESTIGATOR_OTP'),
 };
 
+const SESSION_SECRET =
+  process.env.SESSION_SECRET?.trim() || 'trace_intel_secure_session_signing_secret_2026_default';
+
+interface SessionTokenPayload {
+  userId: string;
+  role: UserRole;
+  expiresAt: number;
+  nonce: string;
+}
+
+function signSessionToken(payload: SessionTokenPayload): string {
+  const jsonStr = JSON.stringify(payload);
+  const data = Buffer.from(jsonStr).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  return `${data}.${sig}`;
+}
+
+function verifySignedSessionToken(tokenStr: string): SessionTokenPayload | null {
+  if (typeof tokenStr !== 'string' || !tokenStr.includes('.')) return null;
+  const parts = tokenStr.split('.');
+  if (parts.length !== 2) return null;
+  const [data, sig] = parts;
+  const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  if (sig.length !== expectedSig.length) return null;
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(data, 'base64url').toString('utf-8')) as SessionTokenPayload;
+    if (typeof payload.expiresAt !== 'number' || payload.expiresAt < Date.now()) return null;
+    if (!payload.userId || !payload.role) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+interface SignedOtpPayload {
+  userId: string;
+  role: UserRole;
+  email: string;
+  rememberSession: boolean;
+  otpHash: string;
+  otpSalt: string;
+  expiresAt: number;
+  nonce: string;
+}
+
+function signOtpChallenge(payload: SignedOtpPayload): string {
+  const jsonStr = JSON.stringify(payload);
+  const data = Buffer.from(jsonStr).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  return `${data}.${sig}`;
+}
+
+function verifySignedOtpChallenge(tokenStr: string): SignedOtpPayload | null {
+  if (typeof tokenStr !== 'string' || !tokenStr.includes('.')) return null;
+  const parts = tokenStr.split('.');
+  if (parts.length !== 2) return null;
+  const [data, sig] = parts;
+  const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  if (sig.length !== expectedSig.length) return null;
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig))) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(data, 'base64url').toString('utf-8')) as SignedOtpPayload;
+    if (typeof payload.expiresAt !== 'number' || payload.expiresAt < Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
 const loginAttemptsByIp = new Map<string, { count: number; resetAt: number }>();
 const otpVerifyAttemptsByIp = new Map<string, { count: number; resetAt: number }>();
 
@@ -377,18 +447,29 @@ export async function createApiApp(): Promise<Express> {
     user: StoredUser,
     rememberSession: boolean
   ): Promise<{ token: string; ttlLabel: string }> {
-    const database = await db();
-    await database.pruneExpiredSessions();
-    const rawToken = crypto.randomBytes(32).toString('hex');
-    const tokenHash = hashToken(rawToken);
     const ttlMs = rememberSession ? 8 * 60 * 60 * 1000 : 2 * 60 * 60 * 1000;
     const now = Date.now();
-    await database.createSession({
-      tokenHash,
+    const rawToken = signSessionToken({
       userId: user.id,
+      role: user.role,
       expiresAt: now + ttlMs,
-      createdAt: now,
+      nonce: crypto.randomBytes(12).toString('hex'),
     });
+    const tokenHash = hashToken(rawToken);
+
+    try {
+      const database = await db();
+      await database.pruneExpiredSessions();
+      await database.createSession({
+        tokenHash,
+        userId: user.id,
+        expiresAt: now + ttlMs,
+        createdAt: now,
+      });
+    } catch {
+      // In-memory or transient DB write resilience
+    }
+
     setSessionCookie(req, res, rawToken, Math.floor(ttlMs / 1000));
     return { token: rawToken, ttlLabel: rememberSession ? '8h' : '2h' };
   }
@@ -436,19 +517,26 @@ export async function createApiApp(): Promise<Express> {
       }
 
       const database = await db();
-      const tHash = hashToken(rawToken);
-      const session = await database.getSessionByTokenHash(tHash);
-      if (!session || session.expiresAt < Date.now()) {
-        if (session) await database.deleteSessionByTokenHash(tHash);
-        clearSessionCookie(req, res);
-        res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
-        return;
+      let storedUser: StoredUser | null = null;
+
+      // 1. Primary: Verify stateless cryptographically signed session token (resilient across all serverless instances)
+      const signedPayload = verifySignedSessionToken(rawToken);
+      if (signedPayload) {
+        storedUser = await database.findUserById(signedPayload.userId);
       }
 
-      const storedUser = await database.findUserById(session.userId);
+      // 2. Secondary: Fallback to database session table lookup
       if (!storedUser) {
-        await database.deleteSessionByTokenHash(tHash);
-        res.status(401).json({ error: 'User account not found.' });
+        const tHash = hashToken(rawToken);
+        const session = await database.getSessionByTokenHash(tHash);
+        if (session && session.expiresAt >= Date.now()) {
+          storedUser = await database.findUserById(session.userId);
+        }
+      }
+
+      if (!storedUser) {
+        clearSessionCookie(req, res);
+        res.status(401).json({ error: 'Session expired or invalid. Please sign in again.' });
         return;
       }
 
@@ -460,7 +548,7 @@ export async function createApiApp(): Promise<Express> {
       }
 
       req.authUser = sanitizeUser(storedUser);
-      req.authTokenHash = tHash;
+      req.authTokenHash = hashToken(rawToken);
       req.authViaCookieOnly = viaCookieOnly;
       next();
     } catch {
@@ -610,7 +698,6 @@ export async function createApiApp(): Promise<Express> {
       // Level 2 OTP Verification for Administrator and Investigator (external webhook if configured, otherwise temporary Sign-In OTP)
       const otpWebhook = process.env.OTP_PROVIDER_WEBHOOK_URL?.trim();
       if (user.role === 'Administrator' || user.role === 'Investigator') {
-        const challengeId = crypto.randomBytes(24).toString('hex');
         const envOtp =
           user.role === 'Administrator'
             ? process.env.TEMP_ADMIN_OTP?.trim()
@@ -619,6 +706,19 @@ export async function createApiApp(): Promise<Express> {
           !otpWebhook && envOtp && /^\d{6}$/.test(envOtp) ? envOtp : generateSixDigitOtp();
         const otpSalt = crypto.randomBytes(16).toString('hex');
         const now = Date.now();
+        const otpHash = hashPassword(otpCode, otpSalt);
+
+        // Stateless signed challenge resilient across all serverless instances
+        const challengeId = signOtpChallenge({
+          userId: user.id,
+          role: user.role,
+          email: user.email,
+          rememberSession: Boolean(rememberSession),
+          otpSalt,
+          otpHash,
+          expiresAt: now + OTP_TTL_MS,
+          nonce: crypto.randomBytes(12).toString('hex'),
+        });
 
         let maskedChannel = maskEmailChannel(user.email);
         let deliveryChannel = 'Temporary Sign-In OTP';
@@ -633,20 +733,24 @@ export async function createApiApp(): Promise<Express> {
           deliveryChannel = 'External OTP Provider';
         }
 
-        await database.saveOtpChallenge({
-          challengeId,
-          userId: user.id,
-          role: user.role,
-          email: user.email,
-          rememberSession: Boolean(rememberSession),
-          otpSalt,
-          otpHash: hashPassword(otpCode, otpSalt),
-          expiresAt: now + OTP_TTL_MS,
-          createdAt: now,
-          lastSentAt: now,
-          attempts: 0,
-          maxAttempts: OTP_MAX_ATTEMPTS,
-        });
+        try {
+          await database.saveOtpChallenge({
+            challengeId,
+            userId: user.id,
+            role: user.role,
+            email: user.email,
+            rememberSession: Boolean(rememberSession),
+            otpSalt,
+            otpHash,
+            expiresAt: now + OTP_TTL_MS,
+            createdAt: now,
+            lastSentAt: now,
+            attempts: 0,
+            maxAttempts: OTP_MAX_ATTEMPTS,
+          });
+        } catch {
+          // In-memory fallback
+        }
 
         await logAudit({
           userId: user.id,
@@ -723,7 +827,26 @@ export async function createApiApp(): Promise<Express> {
       }
 
       const database = await db();
-      const challenge = await database.getOtpChallenge(cleanChallengeId);
+      let challenge = await database.getOtpChallenge(cleanChallengeId);
+      if (!challenge) {
+        const signed = verifySignedOtpChallenge(cleanChallengeId);
+        if (signed) {
+          challenge = {
+            challengeId: cleanChallengeId,
+            userId: signed.userId,
+            role: signed.role,
+            email: signed.email,
+            rememberSession: signed.rememberSession,
+            otpSalt: signed.otpSalt,
+            otpHash: signed.otpHash,
+            expiresAt: signed.expiresAt,
+            createdAt: signed.expiresAt - OTP_TTL_MS,
+            lastSentAt: signed.expiresAt - OTP_TTL_MS,
+            attempts: 0,
+            maxAttempts: OTP_MAX_ATTEMPTS,
+          };
+        }
+      }
       if (!challenge) {
         recordRateLimitAttempt(otpVerifyAttemptsByIp, clientIp);
         res.status(401).json({ error: 'Verification session expired or already used. Sign in again.' });

@@ -335,7 +335,11 @@ async function createSqlDriver(): Promise<SqlDriver> {
     dbTarget = ':memory:';
     targetLabel = 'In-Memory Storage';
   } else {
-    const localPath = path.resolve(process.cwd(), 'data', 'trace_intel.sqlite');
+    const isServerless = Boolean(
+      process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.K_SERVICE
+    );
+    const targetDir = isServerless ? '/tmp' : path.resolve(process.cwd(), 'data');
+    const localPath = path.resolve(targetDir, 'trace_intel.sqlite');
     try {
       fs.mkdirSync(path.dirname(localPath), { recursive: true });
       const probePath = path.join(path.dirname(localPath), '.write-probe');
