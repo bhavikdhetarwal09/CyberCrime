@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TRACE INTEL — CDR/IPDR Analysis &amp; Investigation Platform</title>
+    <meta
+      name="description"
+      content="Enterprise forensic intelligence prototype for normalized Call Detail Records (CDR), IP Detail Records (IPDR), contact network analysis, tower timelines, and evidence-linked AI investigation."
+    />
+    <meta property="og:title" content="TRACE INTEL — CDR/IPDR Analysis &amp; Investigation Platform" />
+    <meta
+      property="og:description"
+      content="Enterprise forensic intelligence prototype for CDR/IPDR correlation, tower-location timelines, IMEI/SIM analysis, and evidence-linked AI investigation."
+    />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+Devanagari:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700&family=Public+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      (function () {
+        try {
+          var savedTheme = localStorage.getItem('traceintel_theme');
+          var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var theme = savedTheme === 'dark' || savedTheme === 'light' ? savedTheme : (prefersDark ? 'dark' : 'light');
+          if (theme === 'dark') document.documentElement.classList.add('dark');
+          else document.documentElement.classList.remove('dark');
+          var savedLang = localStorage.getItem('traceintel_lang');
+          if (savedLang === 'hi' || savedLang === 'en') {
+            document.documentElement.lang = savedLang;
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-[#F5F5F2] dark:bg-[#101A30] text-[#17243B] dark:text-[#F4F5F7] antialiased selection:bg-[#C5A66A]/25 selection:text-[#17243B] dark:selection:text-[#F4F5F7]">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

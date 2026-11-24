@@ -1,0 +1,6 @@
+{
+  "name": "TRACE INTEL",
+  "description": "AI-Powered CDR/IPDR Analysis & Digital Forensics Investigation Platform (Synthetic Hackathon Prototype)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
